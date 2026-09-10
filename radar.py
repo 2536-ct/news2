@@ -1,6 +1,7 @@
 import html
 import os
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
@@ -9,9 +10,16 @@ import requests
 
 
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
+SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
+SLACK_CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID", "")
+SLACK_POST_MESSAGE_URL = "https://slack.com/api/chat.postMessage"
+
 JST = timezone(timedelta(hours=9))
 LOOKBACK_HOURS = 36
 TOP_PER_CATEGORY = 4
+
+_ARGOS_TRANSLATOR = None
+_ARGOS_INIT_ATTEMPTED = False
 
 
 FEEDS = {
@@ -323,6 +331,13 @@ def collect_articles(category, feeds):
     return select_diverse_articles(unique_articles, TOP_PER_CATEGORY)
 
 
+def collect_digest():
+    return {
+        category: collect_articles(category, feeds)
+        for category, feeds in FEEDS.items()
+    }
+
+
 def score_label(score):
     if score >= 16:
         return "🔥 MUST READ"
@@ -331,7 +346,193 @@ def score_label(score):
     return "📰 Pick"
 
 
-def build_message():
+def get_argos_translator():
+    global _ARGOS_TRANSLATOR, _ARGOS_INIT_ATTEMPTED
+
+    if _ARGOS_INIT_ATTEMPTED:
+        return _ARGOS_TRANSLATOR
+
+    _ARGOS_INIT_ATTEMPTED = True
+
+    try:
+        import argostranslate.package
+        import argostranslate.translate
+
+        from_code = "en"
+        to_code = "ja"
+
+        installed_languages = argostranslate.translate.get_installed_languages()
+        from_lang = next(
+            (language for language in installed_languages if language.code == from_code),
+            None,
+        )
+        to_lang = next(
+            (language for language in installed_languages if language.code == to_code),
+            None,
+        )
+
+        if from_lang is None or to_lang is None:
+            print("INFO: installing Argos Translate en→ja language package")
+            argostranslate.package.update_package_index()
+            available_packages = argostranslate.package.get_available_packages()
+            package = next(
+                (
+                    item
+                    for item in available_packages
+                    if item.from_code == from_code and item.to_code == to_code
+                ),
+                None,
+            )
+
+            if package is None:
+                raise RuntimeError("Argos en→ja package is not available")
+
+            argostranslate.package.install_from_path(package.download())
+            installed_languages = argostranslate.translate.get_installed_languages()
+            from_lang = next(
+                language for language in installed_languages if language.code == from_code
+            )
+            to_lang = next(
+                language for language in installed_languages if language.code == to_code
+            )
+
+        translation = from_lang.get_translation(to_lang)
+        _ARGOS_TRANSLATOR = translation.translate
+        return _ARGOS_TRANSLATOR
+    except Exception as exc:
+        print(f"WARN: Japanese translation unavailable: {exc}")
+        _ARGOS_TRANSLATOR = None
+        return None
+
+
+def safe_translate(text, translator=None):
+    text = (text or "").strip()
+    if not text:
+        return ""
+
+    translator = translator or get_argos_translator()
+    if translator is None:
+        return ""
+
+    try:
+        return (translator(text) or "").strip()
+    except Exception as exc:
+        print(f"WARN: translation failed: {exc}")
+        return ""
+
+
+def build_parent_message(digest, now=None):
+    now = now or datetime.now(JST)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=JST)
+    else:
+        now = now.astimezone(JST)
+
+    total = sum(len(articles) for articles in digest.values())
+    lines = [
+        "☀️ *TECH RADAR*",
+        now.strftime("%Y.%m.%d"),
+        "",
+        "今日の AI・VR/XR・Startup ニュースをピックアップしました。",
+        "",
+    ]
+
+    for category in FEEDS:
+        lines.append(f"{category}  {len(digest.get(category, []))}件")
+
+    lines.extend(
+        [
+            "",
+            f"📡 *本日のニュース: {total}件*",
+            "👇 和訳・原文・元記事URLはこの投稿のスレッドへ",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def build_thread_message(category, articles, translator=None):
+    lines = [f"*{category}*", ""]
+
+    if translator is None:
+        translator = get_argos_translator()
+
+    for index, article in enumerate(articles, 1):
+        title = article.get("title", "").strip()
+        summary = article.get("summary", "").strip()
+        japanese_title = safe_translate(title, translator)
+        japanese_summary = safe_translate(summary, translator)
+        published = article.get("published")
+
+        if japanese_title:
+            lines.append(f"*{index}. {japanese_title}*")
+            lines.append(f"Original: {title}")
+        else:
+            lines.append(f"*{index}. {title}*")
+            lines.append("🇯🇵 和訳を取得できませんでした")
+
+        if japanese_summary:
+            lines.append(f"> 🇯🇵 {japanese_summary}")
+        elif summary:
+            lines.append(f"> {summary}")
+
+        meta = f"{score_label(article.get('score', 0))}  ・  {article.get('source', 'Unknown')}"
+        if published:
+            meta += f"  ・  {published.astimezone(JST).strftime('%m/%d %H:%M')}"
+        lines.append(meta)
+        lines.append(f"🔗 <{article.get('url', '')}|元記事を読む>")
+        lines.append("")
+
+    return "\n".join(lines).rstrip()
+
+
+def build_slack_payload(text, channel_id, thread_ts=None):
+    payload = {"channel": channel_id, "text": text}
+    if thread_ts:
+        payload["thread_ts"] = thread_ts
+    return payload
+
+
+def post_slack_message(text, thread_ts=None):
+    if not SLACK_BOT_TOKEN:
+        raise RuntimeError("SLACK_BOT_TOKEN is not configured")
+    if not SLACK_CHANNEL_ID:
+        raise RuntimeError("SLACK_CHANNEL_ID is not configured")
+
+    response = requests.post(
+        SLACK_POST_MESSAGE_URL,
+        headers={
+            "Authorization": f"Bearer {SLACK_BOT_TOKEN}",
+            "Content-Type": "application/json; charset=utf-8",
+        },
+        json=build_slack_payload(text, SLACK_CHANNEL_ID, thread_ts),
+        timeout=30,
+    )
+    response.raise_for_status()
+    data = response.json()
+
+    if not data.get("ok"):
+        raise RuntimeError(f"Slack API error: {data.get('error', 'unknown_error')}")
+
+    return data["ts"]
+
+
+def post_threaded_digest(digest):
+    parent_ts = post_slack_message(build_parent_message(digest))
+    translator = get_argos_translator()
+
+    for category, articles in digest.items():
+        if not articles:
+            continue
+
+        message = build_thread_message(category, articles, translator=translator)
+        post_slack_message(message, thread_ts=parent_ts)
+        time.sleep(1.1)
+
+    return parent_ts
+
+
+def build_message(digest=None):
+    digest = digest or collect_digest()
     today = datetime.now(JST)
     lines = [
         "☀️ *TECH RADAR*",
@@ -342,11 +543,10 @@ def build_message():
 
     total = 0
 
-    for category, feeds in FEEDS.items():
+    for category, articles in digest.items():
         lines.extend(
             ["", "━━━━━━━━━━━━━━━━━━", f"*{category}*", "━━━━━━━━━━━━━━━━━━", ""]
         )
-        articles = collect_articles(category, feeds)
 
         if not articles:
             lines.append(f"過去{LOOKBACK_HOURS}時間に取得できる記事がありませんでした。")
@@ -389,8 +589,25 @@ def send_to_slack(message):
     response.raise_for_status()
 
 
+def main():
+    digest = collect_digest()
+
+    if SLACK_BOT_TOKEN and SLACK_CHANNEL_ID:
+        post_threaded_digest(digest)
+        print("Slack threaded post completed.")
+        return
+
+    if SLACK_WEBHOOK_URL:
+        print("WARN: bot token/channel not configured; using legacy webhook fallback")
+        send_to_slack(build_message(digest))
+        print("Slack webhook post completed.")
+        return
+
+    raise RuntimeError(
+        "Configure SLACK_BOT_TOKEN + SLACK_CHANNEL_ID for threads, "
+        "or SLACK_WEBHOOK_URL for fallback posting."
+    )
+
+
 if __name__ == "__main__":
-    message = build_message()
-    print(message)
-    send_to_slack(message)
-    print("Slack post completed.")
+    main()
