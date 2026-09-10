@@ -23,6 +23,14 @@ class RadarV2Tests(unittest.TestCase):
         )
         self.assertGreaterEqual(score, 10)
 
+    def test_short_keywords_do_not_match_inside_unrelated_words(self):
+        score = score_article(
+            "Company raises capital for a retail expansion",
+            "Traditional retail chain announces a financing round.",
+            "🤖 AI",
+        )
+        self.assertEqual(score, 0)
+
     def test_extract_summary_removes_html_and_truncates_cleanly(self):
         summary = extract_summary(
             "<p>Spatial computing startup launches a new headset platform for developers.</p>",
