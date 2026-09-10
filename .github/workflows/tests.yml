@@ -11,6 +11,9 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      SLACK_WEBHOOK_URL: https://example.invalid/webhook
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
