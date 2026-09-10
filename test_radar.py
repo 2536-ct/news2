@@ -5,6 +5,7 @@ from radar import (
     extract_summary,
     normalize_text,
     score_article,
+    select_diverse_articles,
 )
 
 
@@ -63,6 +64,42 @@ class RadarV2Tests(unittest.TestCase):
 
         self.assertEqual(len(unique), 2)
         self.assertEqual(unique[0]["score"], 12)
+
+    def test_select_diverse_articles_prefers_one_article_per_source_first(self):
+        articles = [
+            {"title": "A1", "source": "Source A", "score": 20},
+            {"title": "A2", "source": "Source A", "score": 19},
+            {"title": "B1", "source": "Source B", "score": 18},
+            {"title": "C1", "source": "Source C", "score": 17},
+            {"title": "D1", "source": "Source D", "score": 16},
+        ]
+
+        selected = select_diverse_articles(articles, limit=4)
+
+        self.assertEqual([article["source"] for article in selected], [
+            "Source A",
+            "Source B",
+            "Source C",
+            "Source D",
+        ])
+        self.assertNotIn("A2", [article["title"] for article in selected])
+
+    def test_select_diverse_articles_fills_remaining_slots_by_score(self):
+        articles = [
+            {"title": "A1", "source": "Source A", "score": 20},
+            {"title": "A2", "source": "Source A", "score": 18},
+            {"title": "B1", "source": "Source B", "score": 19},
+            {"title": "B2", "source": "Source B", "score": 17},
+        ]
+
+        selected = select_diverse_articles(articles, limit=4)
+
+        self.assertEqual([article["title"] for article in selected], [
+            "A1",
+            "B1",
+            "A2",
+            "B2",
+        ])
 
 
 if __name__ == "__main__":

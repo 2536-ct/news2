@@ -235,6 +235,43 @@ def dedupe_articles(articles):
     return unique
 
 
+def select_diverse_articles(articles, limit=TOP_PER_CATEGORY):
+    ranked = sorted(
+        articles,
+        key=lambda item: (
+            item.get("score", 0),
+            item.get("published", datetime.min.replace(tzinfo=timezone.utc)),
+        ),
+        reverse=True,
+    )
+
+    selected = []
+    selected_ids = set()
+    used_sources = set()
+
+    for article in ranked:
+        source = article.get("source", "")
+        if source in used_sources:
+            continue
+
+        selected.append(article)
+        selected_ids.add(id(article))
+        used_sources.add(source)
+
+        if len(selected) >= limit:
+            return selected
+
+    for article in ranked:
+        if id(article) in selected_ids:
+            continue
+
+        selected.append(article)
+        if len(selected) >= limit:
+            break
+
+    return selected
+
+
 def collect_articles(category, feeds):
     articles = []
     cutoff = datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
@@ -282,7 +319,8 @@ def collect_articles(category, feeds):
                 }
             )
 
-    return dedupe_articles(articles)[:TOP_PER_CATEGORY]
+    unique_articles = dedupe_articles(articles)
+    return select_diverse_articles(unique_articles, TOP_PER_CATEGORY)
 
 
 def score_label(score):
