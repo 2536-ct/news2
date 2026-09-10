@@ -1,9 +1,14 @@
 import unittest
+from datetime import datetime, timezone
 
 from radar import (
+    build_parent_message,
+    build_slack_payload,
+    build_thread_message,
     dedupe_articles,
     extract_summary,
     normalize_text,
+    safe_translate,
     score_article,
     select_diverse_articles,
 )
@@ -76,12 +81,10 @@ class RadarV2Tests(unittest.TestCase):
 
         selected = select_diverse_articles(articles, limit=4)
 
-        self.assertEqual([article["source"] for article in selected], [
-            "Source A",
-            "Source B",
-            "Source C",
-            "Source D",
-        ])
+        self.assertEqual(
+            [article["source"] for article in selected],
+            ["Source A", "Source B", "Source C", "Source D"],
+        )
         self.assertNotIn("A2", [article["title"] for article in selected])
 
     def test_select_diverse_articles_fills_remaining_slots_by_score(self):
@@ -94,12 +97,72 @@ class RadarV2Tests(unittest.TestCase):
 
         selected = select_diverse_articles(articles, limit=4)
 
-        self.assertEqual([article["title"] for article in selected], [
-            "A1",
-            "B1",
-            "A2",
-            "B2",
-        ])
+        self.assertEqual(
+            [article["title"] for article in selected],
+            ["A1", "B1", "A2", "B2"],
+        )
+
+    def test_safe_translate_returns_empty_string_when_translator_fails(self):
+        def broken_translator(_text):
+            raise RuntimeError("translation failed")
+
+        self.assertEqual(safe_translate("Hello", broken_translator), "")
+        self.assertEqual(safe_translate("", broken_translator), "")
+
+    def test_build_parent_message_summarizes_category_counts(self):
+        digest = {
+            "🤖 AI": [{"title": "A"}, {"title": "B"}],
+            "🥽 VR / XR": [{"title": "C"}],
+            "🚀 STARTUP": [],
+        }
+
+        message = build_parent_message(
+            digest,
+            now=datetime(2026, 9, 10, 8, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertIn("TECH RADAR", message)
+        self.assertIn("🤖 AI  2件", message)
+        self.assertIn("🥽 VR / XR  1件", message)
+        self.assertIn("🚀 STARTUP  0件", message)
+        self.assertIn("3件", message)
+        self.assertIn("スレッド", message)
+
+    def test_build_thread_message_contains_japanese_and_original_text(self):
+        article = {
+            "title": "OpenAI launches a new agent",
+            "summary": "The tool helps developers automate coding tasks.",
+            "url": "https://example.com/article",
+            "source": "OpenAI",
+            "score": 16,
+            "published": datetime(2026, 9, 10, 0, 0, tzinfo=timezone.utc),
+        }
+
+        translations = {
+            article["title"]: "OpenAIが新しいエージェントを発表",
+            article["summary"]: "開発者のコーディング作業を自動化するツールです。",
+        }
+
+        message = build_thread_message(
+            "🤖 AI",
+            [article],
+            translator=lambda text: translations[text],
+        )
+
+        self.assertIn("OpenAIが新しいエージェントを発表", message)
+        self.assertIn("Original: OpenAI launches a new agent", message)
+        self.assertIn("開発者のコーディング作業", message)
+        self.assertIn("https://example.com/article", message)
+
+    def test_build_slack_payload_adds_thread_ts_only_for_reply(self):
+        parent = build_slack_payload("hello", "C123")
+        reply = build_slack_payload("details", "C123", thread_ts="123.456")
+
+        self.assertEqual(parent, {"channel": "C123", "text": "hello"})
+        self.assertEqual(
+            reply,
+            {"channel": "C123", "text": "details", "thread_ts": "123.456"},
+        )
 
 
 if __name__ == "__main__":

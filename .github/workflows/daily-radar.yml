@@ -24,7 +24,14 @@ jobs:
         uses: actions/setup-python@v5
 
         with:
-          python-version: "3.12"
+          python-version: "3.11"
+
+
+      - name: Cache Argos translation model
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/argos-translate
+          key: argos-en-ja-v1-${{ runner.os }}
 
 
       - name: Install dependencies
@@ -33,6 +40,9 @@ jobs:
 
       - name: Run TECH RADAR
         env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          ARGOS_DEVICE_TYPE: cpu
 
         run: python radar.py
