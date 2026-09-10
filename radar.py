@@ -103,7 +103,7 @@ KEYWORDS = {
         "headset": 4,
         "xr": 4,
         "vr": 4,
-        " ar ": 4,
+        "ar": 4,
         "meta": 3,
         "visionos": 4,
         "android xr": 5,
@@ -173,13 +173,22 @@ def get_entry_url(entry):
     return ""
 
 
+def contains_keyword(text, keyword):
+    normalized_text = normalize_text(text)
+    normalized_keyword = normalize_text(keyword)
+
+    if not normalized_keyword:
+        return False
+
+    return f" {normalized_keyword} " in f" {normalized_text} "
+
+
 def score_article(title, summary, category, authority=0, published=None):
-    haystack = f" {normalize_text(title)} {normalize_text(summary)} "
+    haystack = f"{title} {summary}"
     score = authority
 
     for keyword, weight in KEYWORDS.get(category, {}).items():
-        needle = normalize_text(keyword)
-        if needle and needle in haystack:
+        if contains_keyword(haystack, keyword):
             score += weight
 
     if published:
@@ -204,7 +213,10 @@ def dedupe_articles(articles):
 
     for article in sorted(
         articles,
-        key=lambda item: (item.get("score", 0), item.get("published", datetime.min.replace(tzinfo=timezone.utc))),
+        key=lambda item: (
+            item.get("score", 0),
+            item.get("published", datetime.min.replace(tzinfo=timezone.utc)),
+        ),
         reverse=True,
     ):
         title_key = normalize_text(article.get("title", ""))
@@ -293,7 +305,9 @@ def build_message():
     total = 0
 
     for category, feeds in FEEDS.items():
-        lines.extend(["", "━━━━━━━━━━━━━━━━━━", f"*{category}*", "━━━━━━━━━━━━━━━━━━", ""])
+        lines.extend(
+            ["", "━━━━━━━━━━━━━━━━━━", f"*{category}*", "━━━━━━━━━━━━━━━━━━", ""]
+        )
         articles = collect_articles(category, feeds)
 
         if not articles:
@@ -315,10 +329,12 @@ def build_message():
             lines.append("")
             total += 1
 
-    lines.extend([
-        "━━━━━━━━━━━━━━━━━━",
-        f"📡 *{total} articles picked*  |  AI API不使用・元記事URL付き",
-    ])
+    lines.extend(
+        [
+            "━━━━━━━━━━━━━━━━━━",
+            f"📡 *{total} articles picked*  |  AI API不使用・元記事URL付き",
+        ]
+    )
 
     return "\n".join(lines)
 
